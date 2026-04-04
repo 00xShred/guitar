@@ -237,8 +237,8 @@ static int load_presets(void) {
     rewind(f);
     char *buf = malloc(sz + 1);
     if (!buf) { fclose(f); return 0; }
-    fread(buf, 1, sz, f);
-    buf[sz] = '\0';
+    size_t nread = fread(buf, 1, sz, f);
+    buf[nread] = '\0';
     fclose(f);
 
     Preset tmp[MAX_PRESETS];
@@ -642,6 +642,7 @@ int main(void) {
 
         // Save current settings to active preset (W) or new preset (Shift+W)
         if (IsKeyPressed(KEY_W)) {
+            char saved_name[NAME_LEN];
             pthread_mutex_lock(&presets_lock);
             int np = n_presets;
             int target = preset_idx;
@@ -664,10 +665,11 @@ int main(void) {
                 presets[target].depth = trem_depth;
                 preset_idx = target;
             }
+            strncpy(saved_name, presets[preset_idx].name, NAME_LEN - 1);
+            saved_name[NAME_LEN - 1] = '\0';
             pthread_mutex_unlock(&presets_lock);
             save_presets();
-            snprintf(status_msg, sizeof(status_msg),
-                     "saved > %s", presets[preset_idx].name);
+            snprintf(status_msg, sizeof(status_msg), "saved > %s", saved_name);
             status_time = time(NULL);
         }
 
@@ -785,7 +787,7 @@ int main(void) {
         // Bypass indicator
         if (bypass) {
             Color bypass_col = {255, 80, 60, 255};
-            DTEX("BYPASS", MARGIN, title_top + (title_size - 18) / 2, 18, bypass_col);
+            DTEX("BYPASS", MARGIN, title_top + (float)(title_size - 18) / 2, 18, bypass_col);
         }
 
         // VU meters (right side of title bar)
@@ -837,7 +839,7 @@ int main(void) {
                 label_upper[c] = (d->key[c] >= 'a' && d->key[c] <= 'z')
                     ? d->key[c] - 32 : d->key[c];
             label_upper[strlen(d->key) < 6 ? strlen(d->key) : 6] = '\0';
-            DTEX(label_upper, MARGIN, y + (slider_h - label_size) / 2, label_size, label_col);
+            DTEX(label_upper, MARGIN, y + (float)(slider_h - label_size) / 2, label_size, label_col);
 
             // Slider track
             int ty = y + (slider_h - track_h) / 2;
@@ -876,7 +878,7 @@ int main(void) {
             else           snprintf(fmt, sizeof(fmt), "%.2f", val);
             int vx = track_x + track_w + 12;
             Color val_col = is_sel ? TEXT_COLOR : DIM_COLOR;
-            DTEX(fmt, vx, y + (slider_h - value_size) / 2, value_size, val_col);
+            DTEX(fmt, vx, y + (float)(slider_h - value_size) / 2, value_size, val_col);
         }
 
         // Divider below params
@@ -904,7 +906,7 @@ int main(void) {
                 Color fg = (j == preset_idx) ? (Color){255,255,255,255} : DIM_COLOR;
                 DrawRectangleRounded(
                     (Rectangle){bx, preset_y, tw, ph}, 0.4f, 4, bg);
-                DTEX(tag, bx + 12, preset_y + (ph - pfont) / 2, pfont, fg);
+                DTEX(tag, bx + 12, preset_y + (float)(ph - pfont) / 2, pfont, fg);
                 bx += tw + 8;
                 if (bx > ww - MARGIN) break;
             }
@@ -941,7 +943,7 @@ int main(void) {
             int hfont = 16;
             DrawRectangle(0, wh - help_h, ww, help_h, HELP_BG);
             const char *help = "LEFT/RIGHT: adjust  UP/DOWN: select  [ ]: fine  p/P: preset  w: save  W: save new  s/S: sweep  b: bypass  q: quit";
-            DTEX(help, MARGIN, wh - help_h + (help_h - hfont) / 2, hfont, DIM_COLOR);
+            DTEX(help, MARGIN, wh - help_h + (float)(help_h - hfont) / 2, hfont, DIM_COLOR);
         }
 
         #undef DTEX

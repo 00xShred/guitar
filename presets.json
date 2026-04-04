@@ -1,0 +1,13 @@
+{
+  "clean":       {"bit": 24,  "rate": 1,  "drive": 0.0, "tone": 1.0, "mix": 1.0, "trem": 0.0, "depth": 0.0},
+  "clean_boost": {"bit": 24,  "rate": 1,  "drive": 1.5, "tone": 0.9, "mix": 1.0, "trem": 0.0, "depth": 0.0},
+  "blues":       {"bit": 24,  "rate": 1,  "drive": 3.5, "tone": 0.7, "mix": 1.0, "trem": 0.0, "depth": 0.0},
+  "crunch":      {"bit": 16,  "rate": 1,  "drive": 5.0, "tone": 0.8, "mix": 1.0, "trem": 0.0, "depth": 0.0},
+  "metal":       {"bit": 16,  "rate": 1,  "drive": 9.0, "tone": 0.6, "mix": 1.0, "trem": 0.0, "depth": 0.0},
+  "wavy":        {"bit": 24,  "rate": 1,  "drive": 0.5, "tone": 0.9, "mix": 0.8, "trem": 5.0, "depth": 0.6},
+  "tremblues":   {"bit": 24,  "rate": 1,  "drive": 3.0, "tone": 0.7, "mix": 1.0, "trem": 4.0, "depth": 0.5},
+  "lofi":        {"bit": 8,   "rate": 2,  "drive": 1.0, "tone": 0.8, "mix": 1.0, "trem": 0.0, "depth": 0.0},
+  "gameboy":     {"bit": 4,   "rate": 4,  "drive": 0.0, "tone": 1.0, "mix": 1.0, "trem": 0.0, "depth": 0.0},
+  "destroy":     {"bit": 2,   "rate": 8,  "drive": 8.0, "tone": 0.5, "mix": 1.0, "trem": 0.0, "depth": 0.0},
+  "robot":       {"bit": 3,   "rate": 12, "drive": 2.0, "tone": 0.6, "mix": 1.0, "trem": 7.0, "depth": 0.4}
+}

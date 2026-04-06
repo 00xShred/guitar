@@ -106,6 +106,11 @@ static void set_param(int i, float v) {
     }
 }
 
+// ── Signal flag ───────────────────────────────────────────────────────────────
+
+static _Atomic int  quit_flag = 0;
+static void handle_signal(int sig) { (void)sig; quit_flag = 1; }
+
 // ── Pipe listener thread ──────────────────────────────────────────────────────
 
 static void *pipe_listener(void *arg) {
@@ -113,30 +118,37 @@ static void *pipe_listener(void *arg) {
     const char *pipe_path = "/tmp/crush_pipe";
     mkfifo(pipe_path, 0666);
 
-    while (1) {
-        FILE *fp = fopen(pipe_path, "r");
-        if (fp) {
-            char cmd[32];
-            float val;
-            if (fscanf(fp, "%31s %f", cmd, &val) == 2) {
-                if      (strcmp(cmd, "bit")   == 0 && val >= 1.0f && val <= 24.0f)
-                    bit_depth = val;
-                else if (strcmp(cmd, "rate")  == 0 && val >= 1    && val <= 64)
-                    reduction = (int)val;
-                else if (strcmp(cmd, "gain")  == 0 && val > 0.0f  && val <= 4.0f)
-                    input_gain = val;
-                else if (strcmp(cmd, "drive") == 0 && val >= 0.0f && val <= 10.0f)
-                    drive = val;
-                else if (strcmp(cmd, "tone")  == 0 && val >= 0.0f && val <= 1.0f)
-                    tone = val;
-                else if (strcmp(cmd, "mix")   == 0 && val >= 0.0f && val <= 1.0f)
-                    mix = val;
-                else if (strcmp(cmd, "trem")  == 0 && val >= 0.0f && val <= 20.0f)
-                    trem_rate = val;
-                else if (strcmp(cmd, "depth") == 0 && val >= 0.0f && val <= 1.0f)
-                    trem_depth = val;
-            }
-            fclose(fp);
+    while (!quit_flag) {
+        // Non-blocking open so we never hang on exit
+        int fd = open(pipe_path, O_RDONLY | O_NONBLOCK);
+        if (fd < 0) { usleep(50000); continue; }
+
+        char buf[64];
+        ssize_t n = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+
+        if (n <= 0) { usleep(50000); continue; }
+        buf[n] = '\0';
+
+        char cmd[32];
+        float val;
+        if (sscanf(buf, "%31s %f", cmd, &val) == 2) {
+            if      (strcmp(cmd, "bit")   == 0 && val >= 1.0f && val <= 24.0f)
+                bit_depth = val;
+            else if (strcmp(cmd, "rate")  == 0 && val >= 1    && val <= 64)
+                reduction = (int)val;
+            else if (strcmp(cmd, "gain")  == 0 && val > 0.0f  && val <= 4.0f)
+                input_gain = val;
+            else if (strcmp(cmd, "drive") == 0 && val >= 0.0f && val <= 10.0f)
+                drive = val;
+            else if (strcmp(cmd, "tone")  == 0 && val >= 0.0f && val <= 1.0f)
+                tone = val;
+            else if (strcmp(cmd, "mix")   == 0 && val >= 0.0f && val <= 1.0f)
+                mix = val;
+            else if (strcmp(cmd, "trem")  == 0 && val >= 0.0f && val <= 20.0f)
+                trem_rate = val;
+            else if (strcmp(cmd, "depth") == 0 && val >= 0.0f && val <= 1.0f)
+                trem_depth = val;
         }
     }
     return NULL;
@@ -319,7 +331,7 @@ static int load_presets(void) {
 
 static void *hotreload_thread(void *arg) {
     (void)arg;
-    while (1) {
+    while (!quit_flag) {
         usleep(500000);
         struct stat st;
         if (stat(presets_path, &st) == 0 && st.st_mtime != presets_mtime) {
@@ -429,11 +441,6 @@ static void fine_adjust(int sel, float delta) {
     else           v = roundf(v * 100000.0f) / 100000.0f;
     set_param(sel, v);
 }
-
-// ── Signal flag ───────────────────────────────────────────────────────────────
-
-static _Atomic int  quit_flag = 0;
-static void handle_signal(int sig) { (void)sig; quit_flag = 1; }
 
 // ── GUI colors ───────────────────────────────────────────────────────────────
 
@@ -957,5 +964,7 @@ int main(void) {
     kill_sweep();
     jack_deactivate(client);
     jack_client_close(client);
+    pthread_join(pipe_tid,   NULL);
+    pthread_join(reload_tid, NULL);
     return 0;
 }

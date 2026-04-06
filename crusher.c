@@ -10,7 +10,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <pthread.h>
-#include <locale.h>
+#include <stdatomic.h>
 #include <jack/jack.h>
 #include <raylib.h>
 
@@ -20,18 +20,18 @@ jack_port_t   *input_port;
 jack_port_t   *output_port;
 jack_nframes_t sample_rate = 48000;
 
-volatile float bit_depth  = 8.0f;
-volatile int   reduction  = 1;
-volatile float input_gain = 1.0f;
-volatile float drive      = 0.0f;
-volatile float tone       = 1.0f;
-volatile float mix        = 1.0f;
-volatile float trem_rate  = 0.0f;
-volatile float trem_depth = 0.5f;
+_Atomic float bit_depth  = 8.0f;
+_Atomic int   reduction  = 1;
+_Atomic float input_gain = 1.0f;
+_Atomic float drive      = 0.0f;
+_Atomic float tone       = 1.0f;
+_Atomic float mix        = 1.0f;
+_Atomic float trem_rate  = 0.0f;
+_Atomic float trem_depth = 0.5f;
 
-volatile int   bypass     = 0;
-volatile float vu_in      = 0.0f;   // peak input level  (set by DSP, read by UI)
-volatile float vu_out     = 0.0f;   // peak output level (set by DSP, read by UI)
+_Atomic int   bypass     = 0;
+_Atomic float vu_in      = 0.0f;   // peak input level  (set by DSP, read by UI)
+_Atomic float vu_out     = 0.0f;   // peak output level (set by DSP, read by UI)
 
 // ── Preset data ───────────────────────────────────────────────────────────────
 
@@ -46,7 +46,7 @@ typedef struct {
 static Preset          presets[MAX_PRESETS];
 static int             n_presets     = 0;
 static pthread_mutex_t presets_lock  = PTHREAD_MUTEX_INITIALIZER;
-static volatile int    reload_flag   = 0;
+static _Atomic int     reload_flag   = 0;
 static time_t          presets_mtime = 0;
 static char            presets_path[512];
 static char            script_dir[512];
@@ -432,7 +432,7 @@ static void fine_adjust(int sel, float delta) {
 
 // ── Signal flag ───────────────────────────────────────────────────────────────
 
-static volatile int quit_flag = 0;
+static _Atomic int  quit_flag = 0;
 static void handle_signal(int sig) { (void)sig; quit_flag = 1; }
 
 // ── GUI colors ───────────────────────────────────────────────────────────────

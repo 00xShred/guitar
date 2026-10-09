@@ -59,12 +59,62 @@ static char            script_dir[512];
 
 static void apply_preset(int idx);
 
-// ── Sweep subprocess ──────────────────────────────────────────────────────────
+// ── Signal flag ───────────────────────────────────────────────────────────────
 
-static pid_t       sweep_pid  = -1;
+static _Atomic int  quit_flag = 0;
+static void handle_signal(int sig) { (void)sig; quit_flag = 1; }
+
+// ── Sweep LFO ─────────────────────────────────────────────────────────────
+
+static _Atomic int sweep_active = 0;
 static const char *sweep_modes[] = {"bit", "rate", "drive", "tone", "all"};
 #define N_SWEEP_MODES 5
-static int         sweep_midx = 0;
+static _Atomic int sweep_midx = 0;
+
+static void *sweep_thread_func(void *arg) {
+    (void)arg;
+    float bit_val  = 16.0f, bit_dir  = -1.0f;
+    int   rate_val = 1,     rate_dir = 1;
+    float drv_val  = 0.0f,  drv_dir  = 1.0f;
+    float ton_val  = 0.3f,  ton_dir  = 1.0f;
+
+    while (!quit_flag) {
+        if (!sweep_active) {
+            usleep(50000);
+            continue;
+        }
+
+        int m = sweep_midx;
+        // mode 0: bit, 1: rate, 2: drive, 3: tone, 4: all
+        if (m == 0 || m == 4) {
+            bit_val += bit_dir * 0.3f;
+            if (bit_val <= 1.5f)  { bit_val = 1.5f;  bit_dir = 1.0f; }
+            if (bit_val >= 16.0f) { bit_val = 16.0f; bit_dir = -1.0f; }
+            bit_depth = bit_val;
+        }
+        if (m == 1 || m == 4) {
+            rate_val += rate_dir;
+            if (rate_val <= 1)  { rate_val = 1;  rate_dir = 1; }
+            if (rate_val >= 16) { rate_val = 16; rate_dir = -1; }
+            reduction = rate_val;
+        }
+        if (m == 2 || m == 4) {
+            drv_val += drv_dir * 0.1f;
+            if (drv_val <= 0.0f) { drv_val = 0.0f; drv_dir = 1.0f; }
+            if (drv_val >= 9.0f) { drv_val = 9.0f; drv_dir = -1.0f; }
+            drive = drv_val;
+        }
+        if (m == 3) {
+            ton_val += ton_dir * 0.02f;
+            if (ton_val <= 0.3f) { ton_val = 0.3f; ton_dir = 1.0f; }
+            if (ton_val >= 1.0f) { ton_val = 1.0f; ton_dir = -1.0f; }
+            tone = ton_val;
+        }
+
+        usleep(70000);
+    }
+    return NULL;
+}
 
 // ── Status message ────────────────────────────────────────────────────────────
 
@@ -117,10 +167,6 @@ static void set_param(int i, float v) {
     }
 }
 
-// ── Signal flag ───────────────────────────────────────────────────────────────
-
-static _Atomic int  quit_flag = 0;
-static void handle_signal(int sig) { (void)sig; quit_flag = 1; }
 
 // ── Pipe listener thread ──────────────────────────────────────────────────────
 
@@ -200,6 +246,9 @@ static void *pipe_listener(void *arg) {
                         trem_depth = val;
                     else if (strcmp(cmd, "gate")  == 0 && val >= 0.0f && val <= 0.10f)
                         gate_threshold = val;
+                    else if (strcmp(cmd, "sweep") == 0) {
+                        sweep_active = (val > 0.5f);
+                    }
                 }
             }
             line = strtok_r(NULL, "\r\n", &saveptr);
@@ -424,34 +473,6 @@ static void *hotreload_thread(void *arg) {
     return NULL;
 }
 
-// ── Sweep helpers ─────────────────────────────────────────────────────────────
-
-static void kill_sweep(void) {
-    if (sweep_pid > 0) {
-        kill(sweep_pid, SIGTERM);
-        waitpid(sweep_pid, NULL, 0);
-        sweep_pid = -1;
-    }
-}
-
-static void start_sweep(void) {
-    kill_sweep();
-    char sweep_path[600];
-    snprintf(sweep_path, sizeof(sweep_path), "%s/sweep.sh", script_dir);
-    pid_t pid = fork();
-    if (pid == 0) {
-        int devnull = open("/dev/null", O_WRONLY);
-        if (devnull >= 0) {
-            dup2(devnull, STDOUT_FILENO);
-            dup2(devnull, STDERR_FILENO);
-            close(devnull);
-        }
-        execlp("bash", "bash", sweep_path, sweep_modes[sweep_midx], "mid", NULL);
-        _exit(1);
-    } else if (pid > 0) {
-        sweep_pid = pid;
-    }
-}
 
 // ── Apply preset (writes directly to volatile globals) ───────────────────────
 
@@ -594,9 +615,10 @@ int main(void) {
     jack_activate(client);
 
     // Start background threads
-    pthread_t pipe_tid, reload_tid;
-    pthread_create(&pipe_tid,   NULL, pipe_listener,  NULL);
-    pthread_create(&reload_tid, NULL, hotreload_thread, NULL);
+    pthread_t pipe_tid, reload_tid, sweep_tid;
+    pthread_create(&pipe_tid,   NULL, pipe_listener,       NULL);
+    pthread_create(&reload_tid, NULL, hotreload_thread,    NULL);
+    pthread_create(&sweep_tid,  NULL, sweep_thread_func,   NULL);
 
     // Signal handling
     signal(SIGTERM, handle_signal);
@@ -632,11 +654,6 @@ int main(void) {
         if (status_msg[0] && time(NULL) - status_time >= 2)
             status_msg[0] = '\0';
 
-        // Reap sweep child if it exited on its own
-        if (sweep_pid > 0) {
-            pid_t r = waitpid(sweep_pid, NULL, WNOHANG);
-            if (r == sweep_pid) sweep_pid = -1;
-        }
 
         int ww = GetScreenWidth();
         int wh = GetScreenHeight();
@@ -706,17 +723,16 @@ int main(void) {
         // Sweep: S
         if (IsKeyPressed(KEY_S)) {
             if (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)) {
-                kill_sweep();
+                sweep_active = 0;
                 snprintf(status_msg, sizeof(status_msg), "sweep stopped");
                 status_time = time(NULL);
             } else {
-                if (sweep_pid > 0) {
+                if (sweep_active) {
                     sweep_midx = (sweep_midx + 1) % N_SWEEP_MODES;
-                    kill_sweep();
                 } else {
                     sweep_midx = 0;
+                    sweep_active = 1;
                 }
-                start_sweep();
                 snprintf(status_msg, sizeof(status_msg),
                          "sweep > %s", sweep_modes[sweep_midx]);
                 status_time = time(NULL);
@@ -1005,10 +1021,10 @@ int main(void) {
 
         // Sweep status
         {
-            int sweep_active = (sweep_pid > 0);
+            int active = sweep_active;
             char label[128];
             Color col;
-            if (sweep_active) {
+            if (active) {
                 snprintf(label, sizeof(label),
                          "SWEEP: %s  [s] next  [S] stop", sweep_modes[sweep_midx]);
                 col = SWEEP_COLOR;
@@ -1045,10 +1061,8 @@ int main(void) {
     // ── Cleanup ───────────────────────────────────────────────────────────────
     UnloadFont(font);
     CloseWindow();
-    kill_sweep();
-    jack_deactivate(client);
-    jack_client_close(client);
     pthread_join(pipe_tid,   NULL);
     pthread_join(reload_tid, NULL);
+    pthread_join(sweep_tid,  NULL);
     return 0;
 }

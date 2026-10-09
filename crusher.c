@@ -55,8 +55,9 @@ static Preset          presets[MAX_PRESETS];
 static int             n_presets     = 0;
 static pthread_mutex_t presets_lock  = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic int     reload_flag   = 0;
+static _Atomic int     current_preset_idx = 0;
 static time_t          presets_mtime = 0;
-static char            presets_path[512];
+static char            presets_path[1024];
 static char            script_dir[512];
 
 static void apply_preset(int idx);
@@ -128,14 +129,14 @@ static time_t status_time     = 0;
 typedef struct { const char *key; float min, max, step; int is_int; } ParamDef;
 
 static ParamDef param_defs[] = {
-    {"bit",   1.0f, 24.0f, 0.5f,  0},
-    {"rate",  1.0f, 64.0f, 1.0f,  1},
-    {"gain",  0.1f,  4.0f, 0.1f,  0},
-    {"drive", 0.0f, 10.0f, 0.5f,  0},
-    {"tone",  0.0f,  1.0f, 0.05f, 0},
-    {"mix",   0.0f,  1.0f, 0.05f, 0},
-    {"trem",  0.0f, 20.0f, 0.5f,  0},
-    {"depth", 0.0f,  1.0f, 0.05f, 0},
+    {"bit",   1.0f, 24.0f, 0.5f,   0},
+    {"rate",  1.0f, 64.0f, 1.0f,   1},
+    {"gain",  0.1f,  4.0f, 0.1f,   0},
+    {"drive", 0.0f, 10.0f, 0.5f,   0},
+    {"tone",  0.0f,  1.0f, 0.05f,  0},
+    {"mix",   0.0f,  1.0f, 0.05f,  0},
+    {"trem",  0.0f, 20.0f, 0.5f,   0},
+    {"depth", 0.0f,  1.0f, 0.05f,  0},
     {"gate",  0.0f,  0.10f, 0.005f, 0},
 };
 #define N_PARAMS 9
@@ -157,18 +158,17 @@ static float get_param(int i) {
 
 static void set_param(int i, float v) {
     switch (i) {
-        case 0: bit_depth  = v;      break;
-        case 1: reduction  = (int)v; break;
-        case 2: input_gain = v;      break;
-        case 3: drive      = v;      break;
-        case 4: tone       = v;      break;
-        case 5: mix        = v;      break;
-        case 6: trem_rate  = v;      break;
+        case 0: bit_depth      = v;      break;
+        case 1: reduction      = (int)v; break;
+        case 2: input_gain     = v;      break;
+        case 3: drive          = v;      break;
+        case 4: tone           = v;      break;
+        case 5: mix            = v;      break;
+        case 6: trem_rate      = v;      break;
         case 7: trem_depth     = v;      break;
         case 8: gate_threshold = v;      break;
     }
 }
-
 
 // ── Pipe listener thread ──────────────────────────────────────────────────────
 
@@ -266,6 +266,38 @@ int process(jack_nframes_t nframes, void *arg) {
     (void)arg;
     jack_default_audio_sample_t *in  = jack_port_get_buffer(input_port,  nframes);
     jack_default_audio_sample_t *out = jack_port_get_buffer(output_port, nframes);
+    void *midi_buf = midi_in_port ? jack_port_get_buffer(midi_in_port, nframes) : NULL;
+
+    // Process incoming JACK MIDI
+    if (midi_buf) {
+        jack_nframes_t event_count = jack_midi_get_event_count(midi_buf);
+        for (jack_nframes_t e = 0; e < event_count; e++) {
+            jack_midi_event_t event;
+            if (jack_midi_event_get(&event, midi_buf, e) == 0 && event.size >= 2) {
+                unsigned char status = event.buffer[0] & 0xF0;
+                if (status == 0xB0 && event.size >= 3) { // CC
+                    unsigned char cc  = event.buffer[1];
+                    unsigned char val = event.buffer[2];
+                    float norm = (float)val / 127.0f;
+                    if (cc >= 20 && cc < 20 + N_PARAMS) {
+                        int p = cc - 20;
+                        ParamDef *d = &param_defs[p];
+                        float pv = d->min + norm * (d->max - d->min);
+                        set_param(p, pv);
+                    } else if (cc == 1 || cc == 11) { // Mod wheel / Expression -> Mix
+                        set_param(5, norm);
+                    } else if (cc == 64) { // Sustain pedal / Footswitch -> Bypass
+                        bypass = (val >= 64);
+                    }
+                } else if (status == 0xC0) { // Program Change -> Preset
+                    unsigned char prog = event.buffer[1];
+                    if (prog < n_presets) {
+                        apply_preset(prog);
+                    }
+                }
+            }
+        }
+    }
 
     static float last_val     = 0.0f;
     static int   sample_count = 0;
@@ -475,7 +507,6 @@ static void *hotreload_thread(void *arg) {
     return NULL;
 }
 
-
 // ── Apply preset (writes directly to volatile globals) ───────────────────────
 
 static void apply_preset(int idx) {
@@ -491,8 +522,9 @@ static void apply_preset(int idx) {
     tone       = p.tone;
     mix        = p.mix;
     trem_rate  = p.trem;
-    trem_depth     = p.depth;
+    trem_depth = p.depth;
     gate_threshold = p.gate;
+    current_preset_idx = idx;
 }
 
 // ── Save presets to JSON ──────────────────────────────────────────────────────
@@ -571,6 +603,7 @@ static Color slider_colors[N_PARAMS] = {
     {80, 200, 80, 255},    // mix   - green
     {255, 130, 180, 255},  // trem  - pink
     {120, 180, 255, 255},  // depth - light blue
+    {255, 140, 40,  255},  // gate  - orange
 };
 
 // ── GUI layout constants ─────────────────────────────────────────────────────
@@ -633,9 +666,14 @@ int main(void) {
     InitWindow(WIN_W, WIN_H, "BitCrusher");
     SetTargetFPS(60);
 
-    // Load nerd mono font
+    // Load nerd mono font with fallback to raylib default
     Font font = LoadFontEx("/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf", 48, NULL, 0);
-    SetTextureFilter(font.texture, TEXTURE_FILTER_BILINEAR);
+    int custom_font = (font.texture.id != 0);
+    if (custom_font) {
+        SetTextureFilter(font.texture, TEXTURE_FILTER_BILINEAR);
+    } else {
+        font = GetFontDefault();
+    }
 
     int selected   = 0;
     int preset_idx = 0;
@@ -657,6 +695,8 @@ int main(void) {
         if (status_msg[0] && time(NULL) - status_time >= 2)
             status_msg[0] = '\0';
 
+        // Sync active preset from background threads/IPC
+        preset_idx = current_preset_idx;
 
         int ww = GetScreenWidth();
         int wh = GetScreenHeight();
@@ -682,7 +722,7 @@ int main(void) {
                     apply_preset(idx);
                     pthread_mutex_lock(&presets_lock);
                     snprintf(status_msg, sizeof(status_msg),
-                             "preset > %s", presets[idx].name);
+                             "preset > %.31s", presets[idx].name);
                     pthread_mutex_unlock(&presets_lock);
                     status_time = time(NULL);
                     preset_idx  = idx;
@@ -697,7 +737,7 @@ int main(void) {
                 apply_preset(9);
                 pthread_mutex_lock(&presets_lock);
                 snprintf(status_msg, sizeof(status_msg),
-                         "preset > %s", presets[9].name);
+                         "preset > %.31s", presets[9].name);
                 pthread_mutex_unlock(&presets_lock);
                 status_time = time(NULL);
                 preset_idx = 9;
@@ -717,7 +757,7 @@ int main(void) {
                 apply_preset(preset_idx);
                 pthread_mutex_lock(&presets_lock);
                 snprintf(status_msg, sizeof(status_msg),
-                         "preset > %s", presets[preset_idx].name);
+                         "preset > %.31s", presets[preset_idx].name);
                 pthread_mutex_unlock(&presets_lock);
                 status_time = time(NULL);
             }
@@ -773,10 +813,10 @@ int main(void) {
                 presets[target].mix   = mix;
                 presets[target].trem  = trem_rate;
                 presets[target].depth = trem_depth;
+                presets[target].gate  = gate_threshold;
                 preset_idx = target;
             }
-            strncpy(saved_name, presets[preset_idx].name, NAME_LEN - 1);
-            saved_name[NAME_LEN - 1] = '\0';
+            snprintf(saved_name, sizeof(saved_name), "%s", presets[preset_idx].name);
             pthread_mutex_unlock(&presets_lock);
             save_presets();
             snprintf(status_msg, sizeof(status_msg), "saved > %s", saved_name);
@@ -813,6 +853,37 @@ int main(void) {
         int preset_y = div_y + 14;
         int sweep_y  = preset_y + 44;
 
+        // ── Preset layout calculation ────────────────────────────────────────
+        pthread_mutex_lock(&presets_lock);
+        int np = n_presets;
+        char pnames[MAX_PRESETS][NAME_LEN];
+        for (int j = 0; j < np; j++)
+            snprintf(pnames[j], sizeof(pnames[j]), "%.31s", presets[j].name);
+        pthread_mutex_unlock(&presets_lock);
+
+        char ptags[MAX_PRESETS][NAME_LEN + 8];
+        int pwidths[MAX_PRESETS];
+        int pfont = 18;
+        int ph = 36;
+        for (int j = 0; j < np; j++) {
+            if (j < 9)       snprintf(ptags[j], sizeof(ptags[j]), "%d:%.31s", j + 1, pnames[j]);
+            else if (j == 9) snprintf(ptags[j], sizeof(ptags[j]), "0:%.31s", pnames[j]);
+            else             snprintf(ptags[j], sizeof(ptags[j]), "%.31s", pnames[j]);
+            Vector2 tsz = MeasureTextEx(font, ptags[j], pfont, pfont / 10.0f);
+            pwidths[j] = (int)tsz.x + 24;
+        }
+
+        int start_j = 0;
+        int cur_x = 0;
+        for (int j = 0; j < preset_idx && j < np; j++) cur_x += pwidths[j] + 8;
+        int acc = 0;
+        for (int j = 0; j < np; j++) {
+            if (cur_x + (preset_idx < np ? pwidths[preset_idx] : 0) - acc > ww - 2 * MARGIN) {
+                acc += pwidths[j] + 8;
+                start_j = j + 1;
+            } else break;
+        }
+
         // ── Input: mouse ─────────────────────────────────────────────────────
         Vector2 mouse = GetMousePosition();
 
@@ -829,26 +900,22 @@ int main(void) {
             }
 
             // Check preset buttons
-            if (mouse.y >= preset_y && mouse.y < preset_y + 36) {
-                pthread_mutex_lock(&presets_lock);
-                int np = n_presets;
-                pthread_mutex_unlock(&presets_lock);
+            if (mouse.y >= preset_y && mouse.y < preset_y + ph) {
                 int bx = MARGIN;
-                for (int j = 0; j < np && j < 10; j++) {
-                    pthread_mutex_lock(&presets_lock);
-                    int tw = MeasureText(presets[j].name, 16) + 20;
-                    pthread_mutex_unlock(&presets_lock);
+                for (int j = start_j; j < np; j++) {
+                    int tw = pwidths[j];
                     if (mouse.x >= bx && mouse.x < bx + tw) {
                         apply_preset(j);
                         preset_idx = j;
                         pthread_mutex_lock(&presets_lock);
                         snprintf(status_msg, sizeof(status_msg),
-                                 "preset > %s", presets[j].name);
+                                 "preset > %.31s", presets[j].name);
                         pthread_mutex_unlock(&presets_lock);
                         status_time = time(NULL);
                         break;
                     }
-                    bx += tw + 6;
+                    bx += tw + 8;
+                    if (bx > ww - MARGIN) break;
                 }
             }
         }
@@ -925,6 +992,34 @@ int main(void) {
             }
         }
 
+        // Oscilloscope waveform display (next to VU meters)
+        {
+            int sc_w = 120;
+            int sc_h = 24;
+            int sc_x = ww - MARGIN - 100 - 45 - sc_w;
+            int sc_y = title_top + 2;
+            if (sc_x > (ww + (int)tsz.x) / 2 + 10) {
+                DrawRectangleRounded((Rectangle){sc_x, sc_y, sc_w, sc_h}, 0.3f, 4, TRACK_COLOR);
+                DrawLine(sc_x + 2, sc_y + sc_h / 2, sc_x + sc_w - 2, sc_y + sc_h / 2, (Color){30, 30, 50, 255});
+                int r_idx = atomic_load_explicit(&scope_write_idx, memory_order_relaxed);
+                int prev_px = sc_x;
+                int prev_py = sc_y + sc_h / 2;
+                for (int s = 0; s < sc_w; s++) {
+                    int sample_idx = (r_idx - sc_w + s + SCOPE_SIZE) & (SCOPE_SIZE - 1);
+                    float smp = scope_buf[sample_idx];
+                    if (smp > 1.0f)  smp = 1.0f;
+                    if (smp < -1.0f) smp = -1.0f;
+                    int py = sc_y + sc_h / 2 - (int)(smp * (float)(sc_h / 2 - 2));
+                    int px = sc_x + s;
+                    if (s > 0) {
+                        DrawLine(prev_px, prev_py, px, py, (Color){0, 210, 255, 220});
+                    }
+                    prev_px = px;
+                    prev_py = py;
+                }
+            }
+        }
+
         // Title divider
         DrawRectangle(MARGIN, title_bottom - 4, ww - 2 * MARGIN, 1, DIM_COLOR);
 
@@ -996,27 +1091,14 @@ int main(void) {
 
         // Preset buttons
         {
-            pthread_mutex_lock(&presets_lock);
-            int np = n_presets;
-            char pnames[MAX_PRESETS][NAME_LEN];
-            for (int j = 0; j < np; j++)
-                strncpy(pnames[j], presets[j].name, NAME_LEN - 1);
-            pthread_mutex_unlock(&presets_lock);
-
-            int pfont = 18;
-            int ph = 36;
             int bx = MARGIN;
-            for (int j = 0; j < np && j < 10; j++) {
-                char tag[NAME_LEN + 4];
-                char key = (j < 9) ? (char)('1' + j) : '0';
-                snprintf(tag, sizeof(tag), "%c:%s", key, pnames[j]);
-                Vector2 tsz2 = MTEX(tag, pfont);
-                int tw = (int)tsz2.x + 24;
+            for (int j = start_j; j < np; j++) {
+                int tw = pwidths[j];
                 Color bg = (j == preset_idx) ? PRESET_ACTIVE : PRESET_BG;
                 Color fg = (j == preset_idx) ? (Color){255,255,255,255} : DIM_COLOR;
                 DrawRectangleRounded(
                     (Rectangle){bx, preset_y, tw, ph}, 0.4f, 4, bg);
-                DTEX(tag, bx + 12, preset_y + (float)(ph - pfont) / 2, pfont, fg);
+                DTEX(ptags[j], bx + 12, preset_y + (float)(ph - pfont) / 2, pfont, fg);
                 bx += tw + 8;
                 if (bx > ww - MARGIN) break;
             }
@@ -1062,8 +1144,10 @@ int main(void) {
     }
 
     // ── Cleanup ───────────────────────────────────────────────────────────────
-    UnloadFont(font);
+    if (custom_font) UnloadFont(font);
     CloseWindow();
+    jack_deactivate(client);
+    jack_client_close(client);
     pthread_join(pipe_tid,   NULL);
     pthread_join(reload_tid, NULL);
     pthread_join(sweep_tid,  NULL);

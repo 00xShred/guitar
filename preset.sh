@@ -17,12 +17,5 @@ if ! jq -e ".\"$PRESET\"" "$FILE" >/dev/null 2>&1; then
     exit 1
 fi
 
-for param in bit rate drive tone mix trem depth; do
-    val=$(jq -r ".\"$PRESET\".\"$param\" // empty" "$FILE")
-    if [ -n "$val" ]; then
-        echo "$param $val" >"$PIPE"
-        sleep 0.05
-    fi
-done
-
+echo "preset $PRESET" >"$PIPE"
 echo "Applied preset: $PRESET"

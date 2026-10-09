@@ -7,6 +7,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <pthread.h>
@@ -50,6 +51,8 @@ static _Atomic int     reload_flag   = 0;
 static time_t          presets_mtime = 0;
 static char            presets_path[512];
 static char            script_dir[512];
+
+static void apply_preset(int idx);
 
 // ── Sweep subprocess ──────────────────────────────────────────────────────────
 
@@ -118,39 +121,81 @@ static void *pipe_listener(void *arg) {
     const char *pipe_path = "/tmp/crush_pipe";
     mkfifo(pipe_path, 0666);
 
+    // Keep read-write descriptor open so pipe never sends EOF when writers disconnect
+    int fd = open(pipe_path, O_RDWR | O_NONBLOCK);
+    if (fd < 0) return NULL;
+
+    struct pollfd pfd = { .fd = fd, .events = POLLIN };
+
     while (!quit_flag) {
-        // Non-blocking open so we never hang on exit
-        int fd = open(pipe_path, O_RDONLY | O_NONBLOCK);
-        if (fd < 0) { usleep(50000); continue; }
+        int ret = poll(&pfd, 1, 100);
+        if (ret <= 0) continue;
 
-        char buf[64];
+        char buf[256];
         ssize_t n = read(fd, buf, sizeof(buf) - 1);
-        close(fd);
-
-        if (n <= 0) { usleep(50000); continue; }
+        if (n <= 0) continue;
         buf[n] = '\0';
 
-        char cmd[32];
-        float val;
-        if (sscanf(buf, "%31s %f", cmd, &val) == 2) {
-            if      (strcmp(cmd, "bit")   == 0 && val >= 1.0f && val <= 24.0f)
-                bit_depth = val;
-            else if (strcmp(cmd, "rate")  == 0 && val >= 1    && val <= 64)
-                reduction = (int)val;
-            else if (strcmp(cmd, "gain")  == 0 && val > 0.0f  && val <= 4.0f)
-                input_gain = val;
-            else if (strcmp(cmd, "drive") == 0 && val >= 0.0f && val <= 10.0f)
-                drive = val;
-            else if (strcmp(cmd, "tone")  == 0 && val >= 0.0f && val <= 1.0f)
-                tone = val;
-            else if (strcmp(cmd, "mix")   == 0 && val >= 0.0f && val <= 1.0f)
-                mix = val;
-            else if (strcmp(cmd, "trem")  == 0 && val >= 0.0f && val <= 20.0f)
-                trem_rate = val;
-            else if (strcmp(cmd, "depth") == 0 && val >= 0.0f && val <= 1.0f)
-                trem_depth = val;
+        char *saveptr = NULL;
+        char *line = strtok_r(buf, "\r\n", &saveptr);
+        while (line) {
+            char cmd[32];
+            float val = 0.0f;
+            char arg_str[32];
+            if (sscanf(line, "preset %31s", arg_str) == 1) {
+                pthread_mutex_lock(&presets_lock);
+                int found = -1;
+                char *endp = NULL;
+                long n = strtol(arg_str, &endp, 10);
+                if (endp && *endp == '\0' && n >= 0 && n < n_presets) {
+                    found = (int)n;
+                } else {
+                    for (int p = 0; p < n_presets; p++) {
+                        if (strcasecmp(presets[p].name, arg_str) == 0) {
+                            found = p;
+                            break;
+                        }
+                    }
+                }
+                char pname[NAME_LEN] = "";
+                if (found >= 0) {
+                    snprintf(pname, sizeof(pname), "%.31s", presets[found].name);
+                }
+                pthread_mutex_unlock(&presets_lock);
+
+                if (found >= 0) {
+                    apply_preset(found);
+                    snprintf(status_msg, sizeof(status_msg), "preset > %.31s", pname);
+                    status_time = time(NULL);
+                }
+            } else {
+                int matches = sscanf(line, "%31s %f", cmd, &val);
+                if (matches >= 1 && strcmp(cmd, "bypass") == 0) {
+                    if (matches == 2) bypass = (val > 0.5f);
+                    else              bypass = !bypass;
+                } else if (matches == 2) {
+                    if      (strcmp(cmd, "bit")   == 0 && val >= 1.0f && val <= 24.0f)
+                        bit_depth = val;
+                    else if (strcmp(cmd, "rate")  == 0 && val >= 1    && val <= 64)
+                        reduction = (int)val;
+                    else if (strcmp(cmd, "gain")  == 0 && val > 0.0f  && val <= 4.0f)
+                        input_gain = val;
+                    else if (strcmp(cmd, "drive") == 0 && val >= 0.0f && val <= 10.0f)
+                        drive = val;
+                    else if (strcmp(cmd, "tone")  == 0 && val >= 0.0f && val <= 1.0f)
+                        tone = val;
+                    else if (strcmp(cmd, "mix")   == 0 && val >= 0.0f && val <= 1.0f)
+                        mix = val;
+                    else if (strcmp(cmd, "trem")  == 0 && val >= 0.0f && val <= 20.0f)
+                        trem_rate = val;
+                    else if (strcmp(cmd, "depth") == 0 && val >= 0.0f && val <= 1.0f)
+                        trem_depth = val;
+                }
+            }
+            line = strtok_r(NULL, "\r\n", &saveptr);
         }
     }
+    close(fd);
     return NULL;
 }
 

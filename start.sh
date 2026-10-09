@@ -4,10 +4,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Compile if needed
 if [ "$SCRIPT_DIR/crusher.c" -nt "$SCRIPT_DIR/bitcrusher" ]; then
-    echo "Compiling bitcrusher..."
-    gcc -O2 -o "$SCRIPT_DIR/bitcrusher" "$SCRIPT_DIR/crusher.c" \
-        -ljack -lpthread -lm $(pkg-config --cflags --libs raylib)
-    echo "Compiled."
+    make -C "$SCRIPT_DIR"
 fi
 
 # Kill any existing instance
@@ -32,8 +29,10 @@ sleep 0.3
 
     if jack_lsp 2>/dev/null | grep -q "Carla:audio-in1"; then
         jack_connect BitCrusher:output Carla:audio-in1 2>/dev/null || true
+        jack_connect BitCrusher:output Carla:audio-in2 2>/dev/null || true
     else
         jack_connect BitCrusher:output system:playback_1 2>/dev/null || true
+        jack_connect BitCrusher:output system:playback_2 2>/dev/null || true
     fi
 ) &
 

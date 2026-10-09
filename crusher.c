@@ -35,6 +35,10 @@ _Atomic int   bypass     = 0;
 _Atomic float vu_in      = 0.0f;   // peak input level  (set by DSP, read by UI)
 _Atomic float vu_out     = 0.0f;   // peak output level (set by DSP, read by UI)
 
+#define SCOPE_SIZE 512
+static float       scope_buf[SCOPE_SIZE];
+static _Atomic int scope_write_idx = 0;
+
 // ── Preset data ───────────────────────────────────────────────────────────────
 
 #define MAX_PRESETS 32
@@ -223,11 +227,15 @@ int process(jack_nframes_t nframes, void *arg) {
 
     // Bypass: pass audio through unprocessed
     if (bypass) {
+        int widx = atomic_load_explicit(&scope_write_idx, memory_order_relaxed);
         for (int i = 0; i < (int)nframes; i++) {
             float a = fabsf(in[i]);
             if (a > peak_in) peak_in = a;
             out[i] = in[i];
+            scope_buf[widx] = in[i];
+            widx = (widx + 1) & (SCOPE_SIZE - 1);
         }
+        atomic_store_explicit(&scope_write_idx, widx, memory_order_relaxed);
         vu_in  = peak_in;
         vu_out = peak_in;
         return 0;
@@ -248,6 +256,7 @@ int process(jack_nframes_t nframes, void *arg) {
     float trem_inc    = trem_active ? (2.0f * (float)M_PI * tr_rate / sr) : 0.0f;
     if (!trem_active) trem_phase = 0.0f;
 
+    int widx = atomic_load_explicit(&scope_write_idx, memory_order_relaxed);
     for (int i = 0; i < (int)nframes; i++) {
         float dry = in[i];
         float a_in = fabsf(dry);
@@ -287,6 +296,8 @@ int process(jack_nframes_t nframes, void *arg) {
         if (output >  1.0f) output =  1.0f;
         if (output < -1.0f) output = -1.0f;
         out[i] = output;
+        scope_buf[widx] = output;
+        widx = (widx + 1) & (SCOPE_SIZE - 1);
 
         float a_out = fabsf(output);
         if (a_out > peak_out) peak_out = a_out;
@@ -297,6 +308,7 @@ int process(jack_nframes_t nframes, void *arg) {
                 trem_phase -= 2.0f * (float)M_PI;
         }
     }
+    atomic_store_explicit(&scope_write_idx, widx, memory_order_relaxed);
 
     vu_in  = peak_in;
     vu_out = peak_out;

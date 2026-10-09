@@ -191,7 +191,9 @@ int process(jack_nframes_t nframes, void *arg) {
     float tr_depth   = trem_depth;
     float sr         = (float)sample_rate;
 
-    float trem_inc = (tr_rate > 0.0f) ? (2.0f * (float)M_PI * tr_rate / sr) : 0.0f;
+    int   trem_active = (tr_rate > 0.0f && tr_depth > 0.0f);
+    float trem_inc    = trem_active ? (2.0f * (float)M_PI * tr_rate / sr) : 0.0f;
+    if (!trem_active) trem_phase = 0.0f;
 
     for (int i = 0; i < (int)nframes; i++) {
         float dry = in[i];
@@ -202,20 +204,21 @@ int process(jack_nframes_t nframes, void *arg) {
         if (sample_count >= rate) {
             float x = dry * gain;
 
-            float scale = 1.0f + drv;
-            x = tanhf(x * scale) / scale;
+            if (drv > 0.001f) {
+                float scale = 1.0f + drv;
+                x = tanhf(x * scale) / scale;
+            }
 
-            x = roundf(x * steps) / steps;
-
-            tone_prev = tone_prev + tone_coeff * (x - tone_prev);
-            x = tone_prev;
-
-            last_val = x;
+            last_val = roundf(x * steps) / steps;
             sample_count = 0;
         }
 
-        float trem_gain  = 1.0f - tr_depth * (0.5f - 0.5f * cosf(trem_phase));
-        float wet_sample = last_val * trem_gain;
+        // Per-sample low-pass tone filter: smooths downsampled steps, min cutoff ~150Hz
+        float alpha = (tone_coeff >= 0.99f) ? 1.0f : (0.02f + 0.97f * tone_coeff);
+        tone_prev += alpha * (last_val - tone_prev);
+
+        float trem_gain  = trem_active ? (1.0f - tr_depth * (0.5f - 0.5f * cosf(trem_phase))) : 1.0f;
+        float wet_sample = tone_prev * trem_gain;
         float output     = dry * (1.0f - wet) + wet_sample * wet;
 
         if (output >  1.0f) output =  1.0f;
@@ -225,9 +228,11 @@ int process(jack_nframes_t nframes, void *arg) {
         float a_out = fabsf(output);
         if (a_out > peak_out) peak_out = a_out;
 
-        trem_phase += trem_inc;
-        if (trem_phase > 2.0f * (float)M_PI)
-            trem_phase -= 2.0f * (float)M_PI;
+        if (trem_active) {
+            trem_phase += trem_inc;
+            if (trem_phase >= 2.0f * (float)M_PI)
+                trem_phase -= 2.0f * (float)M_PI;
+        }
     }
 
     vu_in  = peak_in;

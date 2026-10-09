@@ -13,12 +13,14 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <jack/jack.h>
+#include <jack/midiport.h>
 #include <raylib.h>
 
 // ── DSP globals ───────────────────────────────────────────────────────────────
 
 jack_port_t   *input_port;
 jack_port_t   *output_port;
+jack_port_t   *midi_in_port = NULL;
 jack_nframes_t sample_rate = 48000;
 
 _Atomic float bit_depth  = 8.0f;
@@ -609,8 +611,9 @@ int main(void) {
         return 1;
     }
     sample_rate = jack_get_sample_rate(client);
-    input_port  = jack_port_register(client, "input",  JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput,  0);
-    output_port = jack_port_register(client, "output", JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
+    input_port   = jack_port_register(client, "input",   JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput,  0);
+    output_port  = jack_port_register(client, "output",  JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
+    midi_in_port = jack_port_register(client, "midi_in", JACK_DEFAULT_MIDI_TYPE,  JackPortIsInput,  0);
     jack_set_process_callback(client, process, 0);
     jack_activate(client);
 

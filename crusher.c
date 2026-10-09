@@ -29,6 +29,7 @@ _Atomic float tone       = 1.0f;
 _Atomic float mix        = 1.0f;
 _Atomic float trem_rate  = 0.0f;
 _Atomic float trem_depth = 0.5f;
+_Atomic float gate_threshold = 0.0f;
 
 _Atomic int   bypass     = 0;
 _Atomic float vu_in      = 0.0f;   // peak input level  (set by DSP, read by UI)
@@ -41,7 +42,7 @@ _Atomic float vu_out     = 0.0f;   // peak output level (set by DSP, read by UI)
 
 typedef struct {
     char  name[NAME_LEN];
-    float bit, rate, gain, drive, tone, mix, trem, depth;
+    float bit, rate, gain, drive, tone, mix, trem, depth, gate;
 } Preset;
 
 static Preset          presets[MAX_PRESETS];
@@ -79,8 +80,9 @@ static ParamDef param_defs[] = {
     {"mix",   0.0f,  1.0f, 0.05f, 0},
     {"trem",  0.0f, 20.0f, 0.5f,  0},
     {"depth", 0.0f,  1.0f, 0.05f, 0},
+    {"gate",  0.0f,  0.10f, 0.005f, 0},
 };
-#define N_PARAMS 8
+#define N_PARAMS 9
 
 static float get_param(int i) {
     switch (i) {
@@ -92,6 +94,7 @@ static float get_param(int i) {
         case 5: return mix;
         case 6: return trem_rate;
         case 7: return trem_depth;
+        case 8: return gate_threshold;
     }
     return 0.0f;
 }
@@ -105,7 +108,8 @@ static void set_param(int i, float v) {
         case 4: tone       = v;      break;
         case 5: mix        = v;      break;
         case 6: trem_rate  = v;      break;
-        case 7: trem_depth = v;      break;
+        case 7: trem_depth     = v;      break;
+        case 8: gate_threshold = v;      break;
     }
 }
 
@@ -190,6 +194,8 @@ static void *pipe_listener(void *arg) {
                         trem_rate = val;
                     else if (strcmp(cmd, "depth") == 0 && val >= 0.0f && val <= 1.0f)
                         trem_depth = val;
+                    else if (strcmp(cmd, "gate")  == 0 && val >= 0.0f && val <= 0.10f)
+                        gate_threshold = val;
                 }
             }
             line = strtok_r(NULL, "\r\n", &saveptr);
@@ -210,6 +216,7 @@ int process(jack_nframes_t nframes, void *arg) {
     static int   sample_count = 0;
     static float tone_prev    = 0.0f;
     static float trem_phase   = 0.0f;
+    static float gate_env     = 0.0f;
 
     float peak_in  = 0.0f;
     float peak_out = 0.0f;
@@ -234,6 +241,7 @@ int process(jack_nframes_t nframes, void *arg) {
     float wet        = mix;
     float tr_rate    = trem_rate;
     float tr_depth   = trem_depth;
+    float g_thresh   = gate_threshold;
     float sr         = (float)sample_rate;
 
     int   trem_active = (tr_rate > 0.0f && tr_depth > 0.0f);
@@ -244,6 +252,16 @@ int process(jack_nframes_t nframes, void *arg) {
         float dry = in[i];
         float a_in = fabsf(dry);
         if (a_in > peak_in) peak_in = a_in;
+
+        // Downward noise gate before drive stage
+        if (g_thresh > 0.0001f) {
+            if (a_in > gate_env) gate_env = a_in;
+            else                 gate_env += (a_in - gate_env) * 0.002f;
+            if (gate_env < g_thresh) {
+                float g = gate_env / g_thresh;
+                dry *= g * g;
+            }
+        }
 
         sample_count++;
         if (sample_count >= rate) {
@@ -335,6 +353,7 @@ static int load_presets(void) {
             tmp[count].mix   = 1.0f;
             tmp[count].trem  = 0.0f;
             tmp[count].depth = 0.5f;
+            tmp[count].gate  = 0.0f;
 
             // Parse field:value pairs
             while (*p && depth == 2) {
@@ -357,6 +376,7 @@ static int load_presets(void) {
                     else if (!strcmp(field, "mix"))   tmp[count].mix   = val;
                     else if (!strcmp(field, "trem"))  tmp[count].trem  = val;
                     else if (!strcmp(field, "depth")) tmp[count].depth = val;
+                    else if (!strcmp(field, "gate"))  tmp[count].gate  = val;
                 } else {
                     p++;
                 }
@@ -436,7 +456,8 @@ static void apply_preset(int idx) {
     tone       = p.tone;
     mix        = p.mix;
     trem_rate  = p.trem;
-    trem_depth = p.depth;
+    trem_depth     = p.depth;
+    gate_threshold = p.gate;
 }
 
 // ── Save presets to JSON ──────────────────────────────────────────────────────
@@ -456,7 +477,8 @@ static int save_presets(void) {
         fprintf(f, "    \"tone\": %.2f,\n",  p->tone);
         fprintf(f, "    \"mix\": %.2f,\n",   p->mix);
         fprintf(f, "    \"trem\": %.1f,\n",  p->trem);
-        fprintf(f, "    \"depth\": %.2f\n",  p->depth);
+        fprintf(f, "    \"depth\": %.2f,\n", p->depth);
+        fprintf(f, "    \"gate\": %.3f\n",   p->gate);
         fprintf(f, "  }%s\n", (i < n_presets - 1) ? "," : "");
     }
     pthread_mutex_unlock(&presets_lock);
